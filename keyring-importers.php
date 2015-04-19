@@ -51,6 +51,7 @@ abstract class Keyring_User_Importer_Base {
 	var $errors         = array();
 	var $request_method = 'GET';
 	var $admin_page     = false;
+	var $user_id        = 0;
 
 	function __construct() {
 		// Can't do anything if Keyring is not available.
@@ -66,6 +67,7 @@ abstract class Keyring_User_Importer_Base {
 
 		// Populate options for this importer
 		$this->options = get_user_meta( get_current_user_id(), 'keyring_' . static::SLUG . '_user_importer', true );
+		$this->user_id = get_current_user_id();
 
 		// Add a Keyring handler to push us to the next step of the importer once connected
 		add_action( 'keyring_connection_verified', array( $this, 'verified_connection' ), 10, 3 );
@@ -86,35 +88,22 @@ abstract class Keyring_User_Importer_Base {
 		}
 
 		// If we have a token set already, then load some details for it
-		if ( $this->get_option( 'token' ) && $token = Keyring::get_token_store()->get_token( array( 'service' => static::SLUG, 'id' => $this->get_option( 'token' ) ) ) ) {
-			$this->service = call_user_func( array( static::KEYRING_SERVICE, 'init' ) );
-			$this->service->set_token( $token );
-		}
+		$this->set_service();
 
 		// Make sure the taxonomy entry is ready to go
-		$this->taxonomy = null;
-		$terms          = get_terms( 'keyring_services', array( 'hide_empty' => false ) );
-		foreach ( (array) $terms as $term ) {
-			if ( static::LABEL == $term->name ) {
-				$this->taxonomy = $term;
-				break;
+		$this->set_taxonomy();
+
+		// Pass in only the important options for cron so we don't get mass dupes
+		$cron_options = $this->options;
+		foreach( $cron_options as $key => $value ) {
+			if ( in_array( $key, array( 'page', 'total', 'imported' ) ) ) {
+				unset( $cron_options[$key] );
 			}
-		}
-		if ( is_null( $this->taxonomy ) ) {
-			$term           = wp_insert_term(
-				static::LABEL,
-				'keyring_services',
-				array(
-					'description' => sprintf( __( 'Posts imported from %s', 'keyring' ), static::LABEL ),
-					'slug'        => static::SLUG,
-				)
-			);
-			$this->taxonomy = get_term( $term['term_id'], 'keyring_services' );
 		}
 
 		// Make sure we have a scheduled job to handle auto-imports if enabled
-		if ( $this->get_option( 'auto_import' ) && ! wp_get_schedule( 'keyring_' . static::SLUG . '_user_import_auto_' . get_current_user_id() ) ) {
-			wp_schedule_event( time(), 'hourly', 'keyring_' . static::SLUG . '_user_import_auto_' . get_current_user_id() );
+		if ( $this->get_option( 'auto_import' ) && ! wp_get_schedule( 'keyring_' . static::SLUG . '_user_import_auto', array( 'user_id' => $this->user_id, 'options' => $cron_options ) ) ) {
+			wp_schedule_event( time(), 'hourly', 'keyring_' . static::SLUG . '_user_import_auto', array( 'user_id' => $this->user_id, 'options' => $cron_options ) );
 		}
 
 		// Form handling here, pre-output (in case we need to redirect etc)
@@ -168,6 +157,40 @@ abstract class Keyring_User_Importer_Base {
 		}
 
 		return $instance;
+	}
+
+	function set_service() {
+		// If we have a token set already, then load some details for it
+		if ( $this->get_option( 'token' ) && $token = Keyring::get_token_store()->get_token( array( 'service' => static::SLUG, 'id' => $this->get_option( 'token' ) ) ) ) {
+			$this->service = call_user_func( array( static::KEYRING_SERVICE, 'init' ) );
+			$this->service->set_token( $token );
+		}
+	}
+
+	function set_taxonomy() {
+
+		// Make sure the taxonomy entry is ready to go
+		$this->taxonomy = null;
+		$terms          = get_terms( 'keyring_services', array( 'hide_empty' => false ) );
+		foreach ( (array) $terms as $term ) {
+			if ( static::LABEL == $term->name ) {
+				$this->taxonomy = $term;
+				break;
+			}
+		}
+
+		if ( is_null( $this->taxonomy ) ) {
+			$term           = wp_insert_term(
+				static::LABEL,
+				'keyring_services',
+				array(
+					'description' => sprintf( __( 'Posts imported from %s', 'keyring' ), static::LABEL ),
+					'slug'        => static::SLUG,
+				)
+			);
+			$this->taxonomy = get_term( $term['term_id'], 'keyring_services' );
+		}
+
 	}
 
 	/**
@@ -232,7 +255,7 @@ abstract class Keyring_User_Importer_Base {
 			}
 		}
 
-		return update_user_meta( get_current_user_id(), 'keyring_' . static::SLUG . '_user_importer', $this->options );
+		return update_user_meta( $this->user_id, 'keyring_' . static::SLUG . '_user_importer', $this->options );
 	}
 
 	/**
@@ -355,370 +378,374 @@ abstract class Keyring_User_Importer_Base {
 	/**
 	 * A default, basic header for the importer UI
 	 */
-function header() {
-	?>
-	<style type="text/css">
+	function header() {
+		?>
+		<style type="text/css">
 			.keyring-importer ul,
 			.keyring-importer ol { margin: 1em 2em; }
 			.keyring-importer li { list-style-type: square; }
 		</style>
-	<div class="keyring-importer">
+		<div class="keyring-importer">
 			<?php screen_icon(); ?>
 			<h2><?php printf( __( '%s Importer', 'keyring' ), esc_html( static::LABEL ) ); ?></h2>
 			<?php
-if ( count( $this->errors ) ) {
-	echo '<div class="error"><ol>';
-	foreach ( $this->errors as $error ) {
-		echo '<li>' . esc_html( $error ) . '</li>';
+		if ( count( $this->errors ) ) {
+			echo '<div class="error"><ol>';
+			foreach ( $this->errors as $error ) {
+				echo '<li>' . esc_html( $error ) . '</li>';
+			}
+			echo '</ol></div>';
+		}
 	}
-	echo '</ol></div>';
-}
-}
 
-/**
- * Default, basic footer for importer UI
- */
-function footer() {
-	echo '</div>';
-}
+	/**
+	 * Default, basic footer for importer UI
+	 */
+	function footer() {
+		echo '</div>';
+	}
 
-/**
- * The first screen the user sees in the import process. Summarizes the process and allows
- * them to either select an existing Keyring token or start the process of creating a new one.
- * Also makes sure they have the correct service available, and that it's configured correctly.
- */
-function greet() {
-if ( method_exists( $this, 'full_custom_greet' ) ) {
-	$this->full_custom_greet();
-	return;
-}
+	/**
+	 * The first screen the user sees in the import process. Summarizes the process and allows
+	 * them to either select an existing Keyring token or start the process of creating a new one.
+	 * Also makes sure they have the correct service available, and that it's configured correctly.
+	 */
+	function greet() {
+		if ( method_exists( $this, 'full_custom_greet' ) ) {
+			$this->full_custom_greet();
+			return;
+		}
 
-$this->header();
+		$this->header();
 
-// If this service is not configured, then we can't continue
-if (! $service = Keyring::get_service_by_name( static::SLUG )) :
-?>
+		// If this service is not configured, then we can't continue
+		if ( ! $service = Keyring::get_service_by_name( static::SLUG )) :
+		?>
 
-	<p class="error"><?php echo esc_html( sprintf( __( "It looks like you don't have the %s service for Keyring installed.", 'keyring' ), static::LABEL ) ); ?></p>
-			<?php
-	$this->footer();
-	return;
-	?>
+		<p class="error"><?php echo esc_html( sprintf( __( "It looks like you don't have the %s service for Keyring installed.", 'keyring' ), static::LABEL ) ); ?></p>
+		<?php
+			$this->footer();
+			return;
+		?>
+
 		<?php elseif ( ! $service->is_configured() ) : ?>
 
-	<p class="error"><?php echo esc_html( sprintf( __( "Before you can use this importer, you need to configure the %s service within Keyring.", 'keyring' ), static::LABEL ) ); ?></p>
-		<?php
-	if (
-		current_user_can( 'read' ) // @todo this capability should match whatever the UI requires in Keyring
-		&&
-		! KEYRING__HEADLESS_MODE // In headless mode, there's nowhere (known) to link to
-		&&
-		has_action( 'keyring_' . static::SLUG . '_manage_ui' ) // Does this service have a UI to link to?
-	) {
-		$manage_kr_nonce = wp_create_nonce( 'keyring-manage' );
-		$manage_nonce    = wp_create_nonce( 'keyring-manage-' . static::SLUG );
-		echo '<p><a href="' . esc_url( Keyring_Util::admin_url( static::SLUG, array( 'action' => 'manage', 'kr_nonce' => $manage_kr_nonce, 'nonce' => $manage_nonce ) ) ) . '" class="button-primary">' . sprintf( __( 'Configure %s Service', 'keyring' ), static::LABEL ) . '</a></p>';
+
+		<p class="error"><?php echo esc_html( sprintf( __( "Before you can use this importer, you need to configure the %s service within Keyring.", 'keyring' ), static::LABEL ) ); ?></p>
+				<?php
+		if (
+			current_user_can( 'read' ) // @todo this capability should match whatever the UI requires in Keyring
+			&&
+			! KEYRING__HEADLESS_MODE // In headless mode, there's nowhere (known) to link to
+			&&
+			has_action( 'keyring_' . static::SLUG . '_manage_ui' ) // Does this service have a UI to link to?
+		) {
+			$manage_kr_nonce = wp_create_nonce( 'keyring-manage' );
+			$manage_nonce    = wp_create_nonce( 'keyring-manage-' . static::SLUG );
+			echo '<p><a href="' . esc_url( Keyring_Util::admin_url( static::SLUG, array( 'action' => 'manage', 'kr_nonce' => $manage_kr_nonce, 'nonce' => $manage_nonce ) ) ) . '" class="button-primary">' . sprintf( __( 'Configure %s Service', 'keyring' ), static::LABEL ) . '</a></p>';
+		}
+		$this->footer();
+		return;
+		?>
+			<?php endif; ?>
+
+
+
+			<div class="narrow">
+				<form action="<?php echo $this->get_form_action(); ?>&amp;step=greet" method="post">
+					<p><?php printf( __( "Howdy! This importer requires you to connect to %s before you can continue.", 'keyring' ), static::LABEL ); ?></p>
+					<?php do_action( 'keyring_user_importer_' . static::SLUG . '_greet' ); ?>
+					<?php if ( $service->is_connected() ) : ?>
+						<p><?php echo sprintf( esc_html( __( 'It looks like you\'re already connected to %1$s via %2$s. You may use an existing connection, or create a new one:', 'keyring' ) ), static::LABEL, '<a href="' . esc_attr( Keyring_Util::admin_url() ) . '">Keyring</a>' ); ?></p>
+						<?php $service->token_select_box( static::SLUG . '_token', true ); ?>
+
+
+						<input type="submit" name="connect_existing" value="<?php echo esc_attr( __( 'Continue&hellip;', 'keyring' ) ); ?>" id="connect_existing" class="button-primary" />
+					<?php else : ?>
+						<p><?php echo esc_html( sprintf( __( "To get started, we'll need to connect to your %s account so that we can access your content.", 'keyring' ), static::LABEL ) ); ?></p>
+						<input type="submit" name="create_new" value="<?php echo esc_attr( sprintf( __( 'Connect to %s&#0133;', 'keyring' ), static::LABEL ) ); ?>" id="create_new" class="button-primary" />
+					<?php endif; ?>
+				</form>
+			</div>
+			<?php
+		$this->footer();
 	}
-	$this->footer();
-	return;
-	?>
-		<?php endif; ?>
 
+	/**
+	 * If the user created a new Keyring connection, then this method handles intercepting
+	 * when the user returns back to WP/Keyring, passing the details of the created token back to
+	 * the importer.
+	 *
+	 * @param array $request The $_REQUEST made after completing the Keyring connection process
+	 */
+	function verified_connection( $service, $id, $request_token ) {
+		// Only handle connections that were for us
+		global $keyring_request_token;
+		if ( ! $keyring_request_token || 'keyring-' . static::SLUG . '-user-importer-' . get_current_user_id() != $keyring_request_token->get_meta( 'for' ) ) {
+			return;
+		}
 
-	<div class="narrow">
-			<form action="<?php echo $this->get_form_action(); ?>&amp;step=greet" method="post">
-				<p><?php printf( __( "Howdy! This importer requires you to connect to %s before you can continue.", 'keyring' ), static::LABEL ); ?></p>
-				<?php do_action( 'keyring_user_importer_' . static::SLUG . '_greet' ); ?>
-				<?php if ( $service->is_connected() ) : ?>
-					<p><?php echo sprintf( esc_html( __( 'It looks like you\'re already connected to %1$s via %2$s. You may use an existing connection, or create a new one:', 'keyring' ) ), static::LABEL, '<a href="' . esc_attr( Keyring_Util::admin_url() ) . '">Keyring</a>' ); ?></p>
-					<?php $service->token_select_box( static::SLUG . '_token', true ); ?>
+		// Only handle requests that were successful, and for our specific service
+		if ( static::SLUG == $service && $id ) {
+			// Redirect to ::greet() of our importer, which handles keeping track of the token in use, then proceeds
+			wp_safe_redirect(
+				add_query_arg(
+					static::SLUG . '_token',
+					(int) $id,
+					admin_url( $this->get_form_action() . '&step=greet' )
+				)
+			);
+			exit;
+		}
+	}
 
-					<input type="submit" name="connect_existing" value="<?php echo esc_attr( __( 'Continue&hellip;', 'keyring' ) ); ?>" id="connect_existing" class="button-primary" />
-				<?php else : ?>
-					<p><?php echo esc_html( sprintf( __( "To get started, we'll need to connect to your %s account so that we can access your content.", 'keyring' ), static::LABEL ) ); ?></p>
-					<input type="submit" name="create_new" value="<?php echo esc_attr( sprintf( __( 'Connect to %s&#0133;', 'keyring' ), static::LABEL ) ); ?>" id="create_new" class="button-primary" />
-				<?php endif; ?>
-			</form>
-		</div>
-		<?php
-$this->footer();
-}
-
-/**
- * If the user created a new Keyring connection, then this method handles intercepting
- * when the user returns back to WP/Keyring, passing the details of the created token back to
- * the importer.
- *
- * @param array $request The $_REQUEST made after completing the Keyring connection process
- */
-function verified_connection( $service, $id, $request_token ) {
-	// Only handle connections that were for us
-	global $keyring_request_token;
-	if ( ! $keyring_request_token || 'keyring-' . static::SLUG . '-user-importer-' . get_current_user_id() != $keyring_request_token->get_meta( 'for' ) ) {
+	/**
+	 * Once a connection is selected/created, this UI allows the user to select
+	 * the details of their imported tweets.
+	 */
+	function options() {
+	if ( method_exists( $this, 'full_custom_options' ) ) {
+		$this->full_custom_options();
 		return;
 	}
 
-	// Only handle requests that were successful, and for our specific service
-	if ( static::SLUG == $service && $id ) {
-		// Redirect to ::greet() of our importer, which handles keeping track of the token in use, then proceeds
-		wp_safe_redirect(
-			add_query_arg(
-				static::SLUG . '_token',
-				(int) $id,
-				admin_url( $this->get_form_action() . '&step=greet' )
-			)
-		);
-		exit;
-	}
-}
-
-/**
- * Once a connection is selected/created, this UI allows the user to select
- * the details of their imported tweets.
- */
-function options() {
-if ( method_exists( $this, 'full_custom_options' ) ) {
-	$this->full_custom_options();
-	return;
-}
-
-$this->header();
-
-?>
-
-
-	<form name="import-<?php echo esc_attr( static::SLUG ); ?>" method="post" action="<?php echo $this->get_form_action(); ?>&amp;step=options">
-			<?php
-			if ( $this->get_option( 'auto_import' ) ) :
-				$auto_import_button_label = __( 'Save Changes', 'keyring' );
-				?>
-				<div class="updated inline">
-				<p><?php _e( "You are currently auto-importing new content using the settings below.", 'keyring' ); ?></p>
-					<p><input type="submit" name="refresh" class="button" id="options-refresh" value="<?php esc_attr_e( 'Check for new content now', 'keyring' ); ?>" /></p>
-				</div><?php
-			else :
-				$auto_import_button_label = __( 'Start auto-importing', 'keyring' );
-				?>
-				<p><?php _e( "Now that we're connected, we can go ahead and download your content, importing it all as posts.", 'keyring' ); ?></p><?php
-			endif;
-			?>
-		<p><?php _e( "You can optionally choose to 'Import new content automatically', which will continually import any new posts you make, using the settings below.", 'keyring' ); ?></p>
-		<?php do_action( 'keyring_user_importer_' . static::SLUG . '_options_info' ); ?>
-		<table class="form-table">
-				<tr valign="top">
-					<th scope="row">
-						<label><?php _e( 'Connected as', 'keyring' ) ?></label>
-					</th>
-					<td>
-						<strong><?php echo $this->service->get_token()->get_display(); ?></strong>
-					</td>
-				</tr>
-				<tr valign="top">
-					<th scope="row">
-						<label for="category"><?php _e( 'Import posts into Category', 'keyring' ) ?></label>
-					</th>
-					<td>
-						<select name="category" id="category">
-						<?php
-						$prev_cat   = $this->get_option( 'category' );
-						$categories = get_categories( array( 'hide_empty' => 0 ) );
-						foreach ( $categories as $cat ) {
-							printf( '<option value="%s"' . selected( $prev_cat == $cat->term_id ) . '>%s</option>', $cat->term_id, $cat->name );
-						}
-						?>
-						</select> (<a href="edit-tags.php?taxonomy=category"><?php _e( 'Add New Category', 'keyring' ); ?></a>)
-					</td>
-				</tr>
-				<tr valign="top">
-					<th scope="row">
-						<label for="tags"><?php _e( 'Add tags to all posts', 'keyring' ) ?></label>
-					</th>
-					<td>
-						<?php
-						if ( $tags = $this->get_option( 'tags' ) ) {
-							$tags = implode( ', ', array_map( 'trim', $tags ) );
-						} else {
-							$tags = '';
-						}
-						?>
-						<input type="text" class="regular-text" name="tags" id="tags" value="<?php echo esc_html( $tags ); ?>" />
-						<p class="description"><?php _e( 'Comma-separated list of tags to add to all imported posts.', 'keyring' ); ?></p>
-					</td>
-				</tr>
-
-			<?php
-			// This is a perfect place to hook in if you'd like to output some additional options
-			do_action( 'keyring_user_importer_' . static::SLUG . '_custom_options' );
-			?>
-
-			<tr valign="top">
-					<th scope="row">
-						<label for="auto_import"><?php _e( 'Auto-import new content', 'keyring' ) ?></label>
-					</th>
-					<td>
-						<input type="checkbox" value="1" name="auto_import" id="auto_import"<?php echo checked( 'true' == $this->get_option( 'auto_import', 'true' ) ); ?> />
-					</td>
-				</tr>
-			</table>
-
-			<p class="submit">
-				<input type="hidden" name="author" value="<?php echo get_current_user_id(); ?>" />
-				<input type="submit" name="submit" class="button-primary" id="options-submit" value="<?php _e( 'Import', 'keyring' ); ?>" />
-				<input type="submit" name="reset" value="<?php _e( 'Reset Importer', 'keyring' ); ?>" id="reset" class="button" />
-			</p>
-		</form>
-
-	<script type="text/javascript" charset="utf-8">
-			jQuery( document ).ready( function () {
-				jQuery( '#auto_import' ).on( 'change', function () {
-					if ( jQuery( this ).attr( 'checked' ) ) {
-						jQuery( '#options-submit' ).val( '<?php echo esc_js( $auto_import_button_label ); ?>' );
-					} else {
-						jQuery( '#options-submit' ).val( '<?php echo esc_js( __( 'Import all posts (once-off)', 'keyring' ) ); ?>' );
-					}
-				} ).change();
-			} );
-		</script>
-		<?php
-$this->footer();
-}
-
-/**
- * To allow users to customize what their content looks like within WP, we use a template
- * system for the imported posts. If you want to customize them, then add a folder called
- * 'importer-templates' to your theme, and put files in there named 'template-{$name}.php'
- * where $name is the slug for one of the importers (twitter, instagram etc). If a template
- * isn't found, then the ones included with the importers will be used.
- *
- * An output buffer will be used to capture the output created by include()ing this template
- * once a bunch of variables have been set up.
- */
-function locate_template() {
-	$name     = 'template-' . static::SLUG . '.php';
-	$template = locate_template( array( "importer-templates/$name" ) );
-	if ( ! $template ) {
-		$template = dirname( __FILE__ ) . "/templates/$name";
-	}
-	return $template;
-}
-
-/**
- * Hooked into ::dispatch(), this just handles triggering the import and then dealing with
- * any value returned from it.
- */
-function do_import() {
-	set_time_limit( 0 );
-	$res = $this->import();
-	if ( true !== $res ) {
-		echo '<div class="error"><p>';
-		if ( Keyring_Util::is_error( $res ) ) {
-			$http = $res->get_error_message(); // The entire HTTP object is passed back if it's an error
-			if ( 400 == wp_remote_retrieve_response_code( $http ) ) {
-				printf( __( "Received an error from %s. Please wait for a while then try again.", 'keyring' ), static::LABEL );
-			} else {
-				if ( in_array( wp_remote_retrieve_response_code( $http ), array( 502, 503 ) ) ) {
-					printf( __( "%s is currently experiencing problems. Please wait for a while then try again.", 'keyring' ), static::LABEL );
-				} else {
-					// Raw dump, sorry
-					echo '<p>' . sprintf( __( "We got an unknown error back from %s. This is what they said.", 'keyring' ), static::LABEL ) . '</p>';
-					$body = wp_remote_retrieve_body( $http );
-					echo '<pre>';
-					print_r( $body );
-					echo '</pre>';
-				}
-			}
-		} else {
-			_e( 'Something went wrong. Please try importing again in a few minutes (your details have been saved and the import will continue from where it left off).', 'keyring' );
-		}
-		echo '</p></div>';
-		$this->footer(); // header was already done in import()
-	}
-}
-
-/**
- * Grab a chunk of data from the remote service and process it into posts, and handle actually importing as well.
- * Keeps track of 'state' in the DB.
- */
-function import() {
-	defined( 'WP_IMPORTING' ) or define( 'WP_IMPORTING', true );
-	do_action( 'import_start' );
-	$num = 0;
 	$this->header();
-	echo '<p>' . __( 'Importing Posts...' ) . '</p>';
-	echo '<ol>';
-	while ( ! $this->finished && $num < static::REQUESTS_PER_LOAD ) {
-		$data = $this->make_request();
-		if ( Keyring_Util::is_error( $data ) ) {
-			return $data;
-		}
 
-		$result = $this->extract_posts_from_data( $data );
-		if ( Keyring_Util::is_error( $result ) ) {
-			return $result;
-		}
+	?>
 
-		$result = $this->insert_posts();
-		if ( Keyring_Util::is_error( $result ) ) {
-			return $result;
+
+
+		<form name="import-<?php echo esc_attr( static::SLUG ); ?>" method="post" action="<?php echo $this->get_form_action(); ?>&amp;step=options">
+			<?php
+				if ( $this->get_option( 'auto_import' ) ) :
+					$auto_import_button_label = __( 'Save Changes', 'keyring' );
+					?>
+					<div class="updated inline">
+					<p><?php _e( "You are currently auto-importing new content using the settings below.", 'keyring' ); ?></p>
+						<p><input type="submit" name="refresh" class="button" id="options-refresh" value="<?php esc_attr_e( 'Check for new content now', 'keyring' ); ?>" /></p>
+					</div><?php
+				else :
+					$auto_import_button_label = __( 'Start auto-importing', 'keyring' );
+					?>
+					<p><?php _e( "Now that we're connected, we can go ahead and download your content, importing it all as posts.", 'keyring' ); ?></p><?php
+				endif;
+			?>
+			<p><?php _e( "You can optionally choose to 'Import new content automatically', which will continually import any new posts you make, using the settings below.", 'keyring' ); ?></p>
+			<?php do_action( 'keyring_user_importer_' . static::SLUG . '_options_info' ); ?>
+			<table class="form-table">
+						<tr valign="top">
+							<th scope="row">
+								<label><?php _e( 'Connected as', 'keyring' ) ?></label>
+							</th>
+							<td>
+								<strong><?php echo $this->service->get_token()->get_display(); ?></strong>
+							</td>
+						</tr>
+						<tr valign="top">
+							<th scope="row">
+								<label for="category"><?php _e( 'Import posts into Category', 'keyring' ) ?></label>
+							</th>
+							<td>
+								<select name="category" id="category">
+								<?php
+								$prev_cat   = $this->get_option( 'category' );
+								$categories = get_categories( array( 'hide_empty' => 0 ) );
+								foreach ( $categories as $cat ) {
+									printf( '<option value="%s"' . selected( $prev_cat == $cat->term_id ) . '>%s</option>', $cat->term_id, $cat->name );
+								}
+								?>
+								</select> (<a href="edit-tags.php?taxonomy=category"><?php _e( 'Add New Category', 'keyring' ); ?></a>)
+							</td>
+						</tr>
+						<tr valign="top">
+							<th scope="row">
+								<label for="tags"><?php _e( 'Add tags to all posts', 'keyring' ) ?></label>
+							</th>
+							<td>
+								<?php
+								if ( $tags = $this->get_option( 'tags' ) ) {
+									$tags = implode( ', ', array_map( 'trim', $tags ) );
+								} else {
+									$tags = '';
+								}
+								?>
+								<input type="text" class="regular-text" name="tags" id="tags" value="<?php echo esc_html( $tags ); ?>" />
+								<p class="description"><?php _e( 'Comma-separated list of tags to add to all imported posts.', 'keyring' ); ?></p>
+							</td>
+						</tr>
+
+						<?php
+						// This is a perfect place to hook in if you'd like to output some additional options
+						do_action( 'keyring_user_importer_' . static::SLUG . '_custom_options' );
+						?>
+
+						<tr valign="top">
+							<th scope="row">
+								<label for="auto_import"><?php _e( 'Auto-import new content', 'keyring' ) ?></label>
+							</th>
+							<td>
+								<input type="checkbox" value="1" name="auto_import" id="auto_import"<?php echo checked( 'true' == $this->get_option( 'auto_import', 'true' ) ); ?> />
+							</td>
+						</tr>
+					</table>
+
+					<p class="submit">
+						<input type="hidden" name="author" value="<?php echo get_current_user_id(); ?>" />
+						<input type="submit" name="submit" class="button-primary" id="options-submit" value="<?php _e( 'Import', 'keyring' ); ?>" />
+						<input type="submit" name="reset" value="<?php _e( 'Reset Importer', 'keyring' ); ?>" id="reset" class="button" />
+					</p>
+				</form>
+
+			<script type="text/javascript" charset="utf-8">
+				jQuery( document ).ready( function () {
+					jQuery( '#auto_import' ).on( 'change', function () {
+						if ( jQuery( this ).attr( 'checked' ) ) {
+							jQuery( '#options-submit' ).val( '<?php echo esc_js( $auto_import_button_label ); ?>' );
+						} else {
+							jQuery( '#options-submit' ).val( '<?php echo esc_js( __( 'Import all posts (once-off)', 'keyring' ) ); ?>' );
+						}
+					} ).change();
+				} );
+			</script>
+		<?php
+		$this->footer();
+	}
+
+	/**
+	 * To allow users to customize what their content looks like within WP, we use a template
+	 * system for the imported posts. If you want to customize them, then add a folder called
+	 * 'importer-templates' to your theme, and put files in there named 'template-{$name}.php'
+	 * where $name is the slug for one of the importers (twitter, instagram etc). If a template
+	 * isn't found, then the ones included with the importers will be used.
+	 *
+	 * An output buffer will be used to capture the output created by include()ing this template
+	 * once a bunch of variables have been set up.
+	 */
+	function locate_template() {
+		$name     = 'template-' . static::SLUG . '.php';
+		$template = locate_template( array( "importer-templates/$name" ) );
+		if ( ! $template ) {
+			$template = dirname( __FILE__ ) . "/templates/$name";
+		}
+		return $template;
+	}
+
+	/**
+	 * Hooked into ::dispatch(), this just handles triggering the import and then dealing with
+	 * any value returned from it.
+	 */
+	function do_import() {
+		set_time_limit( 0 );
+		$res = $this->import();
+		if ( true !== $res ) {
+			echo '<div class="error"><p>';
+			if ( Keyring_Util::is_error( $res ) ) {
+				$http = $res->get_error_message(); // The entire HTTP object is passed back if it's an error
+				if ( 400 == wp_remote_retrieve_response_code( $http ) ) {
+					printf( __( "Received an error from %s. Please wait for a while then try again.", 'keyring' ), static::LABEL );
+				} else {
+					if ( in_array( wp_remote_retrieve_response_code( $http ), array( 502, 503 ) ) ) {
+						printf( __( "%s is currently experiencing problems. Please wait for a while then try again.", 'keyring' ), static::LABEL );
+					} else {
+						// Raw dump, sorry
+						echo '<p>' . sprintf( __( "We got an unknown error back from %s. This is what they said.", 'keyring' ), static::LABEL ) . '</p>';
+						$body = wp_remote_retrieve_body( $http );
+						echo '<pre>';
+						print_r( $body );
+						echo '</pre>';
+					}
+				}
+			} else {
+				_e( 'Something went wrong. Please try importing again in a few minutes (your details have been saved and the import will continue from where it left off).', 'keyring' );
+			}
+			echo '</p></div>';
+			$this->footer(); // header was already done in import()
+		}
+	}
+
+	/**
+	 * Grab a chunk of data from the remote service and process it into posts, and handle actually importing as well.
+	 * Keeps track of 'state' in the DB.
+	 */
+	function import() {
+		defined( 'WP_IMPORTING' ) or define( 'WP_IMPORTING', true );
+		do_action( 'import_start' );
+		$num = 0;
+		$this->header();
+		echo '<p>' . __( 'Importing Posts...' ) . '</p>';
+		echo '<ol>';
+		while ( ! $this->finished && $num < static::REQUESTS_PER_LOAD ) {
+			$data = $this->make_request();
+			if ( Keyring_Util::is_error( $data ) ) {
+				return $data;
+			}
+
+			$result = $this->extract_posts_from_data( $data );
+			if ( Keyring_Util::is_error( $result ) ) {
+				return $result;
+			}
+
+			$result = $this->insert_posts();
+			if ( Keyring_Util::is_error( $result ) ) {
+				return $result;
+			} else {
+				echo '<li>' . sprintf( __( 'Imported %d posts in this batch' ), $result['imported'] ) . ( $result['skipped'] ? sprintf( __( ' (skipped %d that looked like duplicates).' ), $result['skipped'] ) : '.' ) . '</li>';
+				flush();
+				$this->set_option( 'imported', ( $this->get_option( 'imported' ) + $result['imported'] ) );
+			}
+
+			// Keep track of which "page" we're up to
+			$this->set_option( 'page', $this->get_option( 'page' ) + 1 );
+
+			// Local (per-page-load) counter
+			$num++;
+		}
+		echo '</ol>';
+		$this->footer();
+
+		if ( $this->finished ) {
+			$this->importer_goto( 'done', 1 );
 		} else {
-			echo '<li>' . sprintf( __( 'Imported %d posts in this batch' ), $result['imported'] ) . ( $result['skipped'] ? sprintf( __( ' (skipped %d that looked like duplicates).' ), $result['skipped'] ) : '.' ) . '</li>';
-			flush();
-			$this->set_option( 'imported', ( $this->get_option( 'imported' ) + $result['imported'] ) );
+			$this->importer_goto( 'import' );
 		}
 
-		// Keep track of which "page" we're up to
-		$this->set_option( 'page', $this->get_option( 'page' ) + 1 );
+		do_action( 'import_end' );
 
-		// Local (per-page-load) counter
-		$num++;
-	}
-	echo '</ol>';
-	$this->footer();
-
-	if ( $this->finished ) {
-		$this->importer_goto( 'done', 1 );
-	} else {
-		$this->importer_goto( 'import' );
+		return true;
 	}
 
-	do_action( 'import_end' );
+	/**
+	 * Super-basic implementation of making the (probably) authorized request. You can (should)
+	 * override this with something more substantial and suitable for the service you're working with.
+	 *
+	 * @return Keyring request response -- either a Keyring_Error or a Service-specific data structure (probably object or array)
+	 */
+	function make_request() {
+		$url = $this->build_request_url();
+		return $this->service->request( $url, array( 'method' => $this->request_method, 'timeout' => 10 ) );
+	}
 
-	return true;
-}
+	/**
+	 * To keep the process moving while avoiding memory issues, it's easier to just
+	 * end a response (handling a set chunk size) and then start another one. Since
+	 * we don't want to have the user sit there hitting "next", we have this helper
+	 * which includes some JS to keep things bouncing on to the next step (while
+	 * there is a next step).
+	 *
+	 * @param string $step    Which step should we direct the user to next?
+	 * @param int    $seconds How many seconds should we wait before auto-redirecting them? Set to null for no auto-redirect.
+	 */
+	function importer_goto($step, $seconds = 3) {
+		echo '<form action="' . $this->get_form_action() . '&amp;step=' . esc_attr( $step ) . '" method="post" id="' . esc_attr( static::SLUG ) . '-import">';
+		echo wp_nonce_field( static::SLUG . '-import', '_wpnonce', true, false );
+		echo wp_referer_field( false );
+		echo '<p><input type="submit" class="button-primary" value="' . __( 'Continue with next batch', 'keyring' ) . '" /> <span id="auto-message"></span></p>';
+		echo '</form>';
 
-/**
- * Super-basic implementation of making the (probably) authorized request. You can (should)
- * override this with something more substantial and suitable for the service you're working with.
- *
- * @return Keyring request response -- either a Keyring_Error or a Service-specific data structure (probably object or array)
- */
-function make_request() {
-	$url = $this->build_request_url();
-	return $this->service->request( $url, array( 'method' => $this->request_method, 'timeout' => 10 ) );
-}
+		if (null !== $seconds) :
+		?>
 
-/**
- * To keep the process moving while avoiding memory issues, it's easier to just
- * end a response (handling a set chunk size) and then start another one. Since
- * we don't want to have the user sit there hitting "next", we have this helper
- * which includes some JS to keep things bouncing on to the next step (while
- * there is a next step).
- *
- * @param string $step    Which step should we direct the user to next?
- * @param int    $seconds How many seconds should we wait before auto-redirecting them? Set to null for no auto-redirect.
- */
-function importer_goto($step, $seconds = 3) {
-echo '<form action="' . $this->get_form_action() . '&amp;step=' . esc_attr( $step ) . '" method="post" id="' . esc_attr( static::SLUG ) . '-import">';
-echo wp_nonce_field( static::SLUG . '-import', '_wpnonce', true, false );
-echo wp_referer_field( false );
-echo '<p><input type="submit" class="button-primary" value="' . __( 'Continue with next batch', 'keyring' ) . '" /> <span id="auto-message"></span></p>';
-echo '</form>';
-
-if (null !== $seconds) :
-?>
-
-
-	<script type="text/javascript">
+		<script type="text/javascript">
 			next_counter = <?php echo (int) $seconds ?>;
 			jQuery( document ).ready( function () {
 				<?php echo esc_js( static::SLUG ); ?>_msg();
@@ -740,7 +767,7 @@ if (null !== $seconds) :
 				setTimeout( '<?php echo esc_js( static::SLUG ); ?>_msg()', 1000 );
 			}
 		</script><?php endif;
-}
+	}
 
 	/**
 	 * When they're complete, give them a quick summary and a link back to their website.
@@ -760,14 +787,35 @@ if (null !== $seconds) :
 	 * rely solely on database state of some sort, since nothing is passed in. Make
 	 * sure to also update anything in the DB required for the next run. If you set up your
 	 * other methods "discretely" enough, you might not need to override this.
+	 *
+	 * @param int   $user_id
+	 * @param array $options
 	 */
-	function do_auto_import() {
+	function do_auto_import( $user_id = 0, $options = array() ) {
 		defined( 'WP_IMPORTING' ) or define( 'WP_IMPORTING', true );
 		do_action( 'import_start' );
 		set_time_limit( 0 );
+
+		// set options
+		$this->options = wp_parse_args( $options, array(
+			'page'     => 0,
+			'total'    => 0,
+			'imported' => 0
+		) );
+		$this->user_id = $user_id;
+
+		// Set the service provider
+		$this->set_service();
+
+		// Set the taxonomy
+		$this->set_taxonomy();
+
 		// In case auto-import has been disabled, clear all jobs and bail
 		if ( ! $this->get_option( 'auto_import' ) ) {
-			wp_clear_scheduled_hook( 'keyring_' . static::SLUG . '_user_import_auto_' . get_current_user_id() );
+			wp_clear_scheduled_hook( 'keyring_' . static::SLUG . '_user_import_auto', array(
+				'user_id' => $user_id,
+				'options' => $options
+			) );
 			return;
 		}
 
@@ -926,9 +974,6 @@ function keyring_register_user_importer( $slug, $class, $plugin, $info = false )
 	global $_keyring_user_importers;
 	$slug                             = preg_replace( '/[^a-z_]/', '', $slug );
 	$_keyring_user_importers[ $slug ] = call_user_func( array( $class, 'init' ) );
-	if ( ! $info ) {
-		$info = __( 'Import content from %s and save it as Posts within WordPress.', 'keyring' );
-	}
 
 	$name = $class::LABEL;
 
@@ -938,11 +983,12 @@ function keyring_register_user_importer( $slug, $class, $plugin, $info = false )
 		$name = '&#10003; ' . $name;
 	}
 
-	$page                                         = add_users_page( esc_html__( $class::LABEL ), esc_html__( $class::LABEL ), 'edit_user', "keyring-user-{$slug}", array( $_keyring_user_importers[ $slug ], 'dispatch' ) );
+	$page = add_users_page( esc_html__( $class::LABEL ), esc_html__( $class::LABEL ), 'edit_user', "keyring-user-{$slug}", array( $_keyring_user_importers[ $slug ], 'dispatch' ) );
+
 	$_keyring_user_importers[ $slug ]->admin_page = $page;
 
 	// Handle auto-import requests
-	add_action( 'keyring_' . $class::SLUG . '_user_import_auto_' . get_current_user_id(), array( $_keyring_user_importers[ $slug ], 'do_auto_import' ) );
+	add_action( 'keyring_' . $class::SLUG . '_user_import_auto', array( $_keyring_user_importers[ $slug ], 'do_auto_import' ), 10, 2 );
 }
 
 $keyring_user_importers = glob( dirname( __FILE__ ) . "/importers/*.php" );

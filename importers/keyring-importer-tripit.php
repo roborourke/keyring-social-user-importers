@@ -272,9 +272,9 @@ class Keyring_TripIt_User_Importer extends Keyring_User_Importer_Base {
 	 * TripIt, so we're going to cut that downt to once every 12 hours by just skipping the job depending
 	 * on the hour. If we want to run, then call the parent auto_import.
 	 */
-	function do_auto_import() {
+	function do_auto_import( $user_id, $options = array() ) {
 		if ( 01 == date( 'H' ) || 12 == date( 'H' ) )
-			parent::do_auto_import();
+			parent::do_auto_import( $user_id, $options );
 	}
 }
 

@@ -315,9 +315,9 @@ function Keyring_Flickr_User_Importer() {
 			return array( 'imported' => $imported, 'skipped' => $skipped );
 		}
 
-		function do_auto_import() {
+		function do_auto_import( $user_id, $options = array() ) {
 			$this->set_option( 'auto_page', 1 );
-			parent::do_auto_import();
+			parent::do_auto_import( $user_id, $options );
 		}
 	}
 
